@@ -1,0 +1,107 @@
+name: Tailscale Server
+on:
+  workflow_dispatch: {}  # Manual trigger only
+  
+
+jobs:
+  run-tailscale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours * 60 minutes = 360 (GitHub max)
+
+    steps:
+      - name: Install Tailscale + jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Enable IP Forwarding
+        run: |
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+      - name: Start Tailscale Exit Node
+        run: |
+          sudo tailscale up \
+            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
+            --ssh \
+            --advertise-exit-node \
+            --hostname=git-server \
+            --reset
+        env:
+          TS_SOCKET: /tmp/tailscaled.sock
+
+      - name: Save Start Time
+        run: |
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + 21600))  # 6 hours in seconds
+          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
+          echo "END_TIME=$END_TIME" >> $GITHUB_ENV
+          echo "Server started at: $(date -d @$START_TIME)"
+          echo "Server will run until: $(date -d @$END_TIME) (6 hours from start)"
+
+      - name: Display Connection Info
+        run: |
+          echo "========================================"
+          echo "✅ Tailscale Server is Running"
+          echo "========================================"
+          echo "Hostname: git-server"
+          echo "SSH Enabled: Yes"
+          echo "Exit Node: Advertised"
+          echo ""
+          echo "Tailscale IPs:"
+          tailscale ip
+          echo ""
+          echo "Connection Status:"
+          tailscale status
+          echo "========================================"
+          echo "⏱️  Server will run for 6 hours"
+          echo "📝 GitHub will auto-terminate at: $(date -d @$END_TIME)"
+          echo "========================================"
+
+      - name: Keep Runner Alive (6 hours)
+        run: |
+          echo "🟢 Server is now active for 6 hours"
+          echo "📍 Press Ctrl+C to manually stop"
+          echo ""
+          
+          # Calculate end time
+          END_TIME=$(( $(date +%s) + 21600 ))
+          
+          # Loop until GitHub terminates the job
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            REMAINING=$((END_TIME - CURRENT_TIME))
+            
+            if [ $REMAINING -le 0 ]; then
+              echo "⏰ 6 hours elapsed - GitHub should terminate soon"
+              break
+            fi
+            
+            # Format remaining time
+            HOURS=$((REMAINING / 3600))
+            MINUTES=$(( (REMAINING % 3600) / 60 ))
+            SECONDS=$((REMAINING % 60))
+            
+            # Get Tailscale status
+            STATUS=$(tailscale status --json | jq -r '.Self.Online')
+            IP=$(tailscale ip -4 2>/dev/null || echo "Not connected")
+            
+            # Clear line and display info
+            echo -ne "\r\033[K"
+            echo -ne "⏱️  Remaining: ${HOURS}h ${MINUTES}m ${SECONDS}s | 🌐 Status: $STATUS | 📍 IP: $IP"
+            
+            sleep 5
+          done
+          
+          # Keep running until GitHub kills the job
+          echo ""
+          echo "⏰ 6 hours completed, waiting for GitHub termination..."
+          sleep infinity
+
+      - name: Cleanup Exit Node
+        if: always()
+        run: |
+          echo "🛑 Cleaning up Tailscale connection..."
+          sudo tailscale down
+          echo "✅ Cleanup complete"
